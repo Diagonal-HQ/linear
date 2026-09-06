@@ -90,6 +90,27 @@ The Paseo agent must inherit `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET`
 ~/.local/bin/linear issue ENG-123
 ```
 
+## Agent skill
+
+[skills/diagonal-linear/SKILL.md](skills/diagonal-linear/SKILL.md) is a
+self-contained example skill that clients can install to teach their agents how
+to use this CLI. It covers credentials, issue commands, GraphQL, pagination, and
+verification of writes.
+
+Set `agent_skills_dir` to your agent's configured skill directory (shown here as
+`~/.agents/skills`), then download the skill:
+
+```sh
+agent_skills_dir="$HOME/.agents/skills"
+mkdir -p "$agent_skills_dir/diagonal-linear"
+curl -fsSL https://raw.githubusercontent.com/Diagonal-HQ/linear/main/skills/diagonal-linear/SKILL.md \
+  -o "$agent_skills_dir/diagonal-linear/SKILL.md"
+```
+
+Reload skills or start a new agent session as required by your client. Install
+the CLI and configure its credentials using the instructions above; the skill
+contains instructions and does not install the executable or supply credentials.
+
 ## Development
 
 ```sh
