@@ -1,12 +1,16 @@
-#!/usr/bin/env python3
-"""A small, standalone Linear GraphQL command-line client.
+#!/bin/sh
+""":"
+exec python3 "$0" "$@"
+":"""
+
+from __future__ import annotations
+
+__doc__ = """A small, standalone Linear GraphQL command-line client.
 
 The executable uses environment-provided OAuth client credentials and caches
 app-actor tokens on disk with mode 0600. Tokens are refreshed shortly before
 expiry and re-minted once after an HTTP 401 response.
 """
-
-from __future__ import annotations
 
 import argparse
 import base64
@@ -25,7 +29,7 @@ from pathlib import Path
 LINEAR_API = "https://api.linear.app/graphql"
 LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 DEFAULT_LINEAR_SCOPE = "read,write,app:assignable,app:mentionable"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 
 # ── token minting / caching ────────────────────────────────────────────────

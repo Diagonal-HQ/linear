@@ -19,6 +19,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "bin" / "linear"
+INSTALLER = ROOT / "install.sh"
+DOWNLOAD_URL = "https://raw.githubusercontent.com/Diagonal-HQ/linear/main/bin/linear"
 LOADER = importlib.machinery.SourceFileLoader("linear_cli", str(SCRIPT))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 assert SPEC is not None
@@ -46,6 +48,30 @@ def token_response(token="minted-token", expires_in=3600):
 
 def http_error(url, code, body):
     return urllib.error.HTTPError(url, code, "failure", {}, io.BytesIO(body.encode()))
+
+
+def write_fake_curl(directory, body):
+    directory.mkdir(parents=True, exist_ok=True)
+    curl = directory / "curl"
+    curl.write_text("#!/bin/sh\nset -eu\n" + body)
+    curl.chmod(0o755)
+    return curl
+
+
+def successful_curl_body():
+    return r'''output=
+url=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift; output=$1 ;;
+    -*) ;;
+    *) url=$1 ;;
+  esac
+  shift
+done
+[ "$url" = "$FAKE_CURL_EXPECTED_URL" ]
+cp "$FAKE_CURL_SOURCE" "$output"
+'''
 
 
 class LinearTest(unittest.TestCase):
@@ -378,25 +404,46 @@ class LinearTest(unittest.TestCase):
 
     def test_version_help_and_copied_executable_are_standalone(self):
         with tempfile.TemporaryDirectory() as temporary:
-            copied = Path(temporary) / "standalone linear"
+            isolated = Path(temporary) / "directory with spaces"
+            isolated.mkdir()
+            copied = isolated / "standalone linear"
             shutil.copy2(SCRIPT, copied)
+            copied.chmod(0o755)
             version = subprocess.run(
                 [sys.executable, str(copied), "--version"],
-                cwd=temporary,
+                cwd=isolated,
                 text=True,
                 capture_output=True,
                 check=False,
             )
             help_result = subprocess.run(
-                [sys.executable, str(copied), "--help"],
-                cwd=temporary,
+                [str(copied), "--help"],
+                cwd=isolated,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            variables = isolated / "invalid variables with spaces.json"
+            variables.write_text("[]")
+            stdin_result = subprocess.run(
+                [
+                    str(copied),
+                    "graphql",
+                    "--file",
+                    "-",
+                    "--variables-file",
+                    str(variables),
+                ],
+                cwd=isolated,
+                input="{ viewer { id } }\n",
                 text=True,
                 capture_output=True,
                 check=False,
             )
 
         self.assertEqual(version.returncode, 0, version.stderr)
-        self.assertEqual(version.stdout, "linear 0.1.0\n")
+        self.assertEqual(version.stdout, "linear 0.1.1\n")
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         for command in (
             "token",
@@ -411,17 +458,72 @@ class LinearTest(unittest.TestCase):
             self.assertIn(command, help_result.stdout)
         self.assertNotIn("Hermes", help_result.stdout)
         self.assertNotIn("Probe", help_result.stdout)
+        self.assertEqual(stdin_result.returncode, 1)
+        self.assertEqual(stdin_result.stdout, "")
+        self.assertIn("GraphQL variables must be a JSON object", stdin_result.stderr)
+        self.assertIn("standalone Linear", linear.__doc__)
 
-    def test_installer_handles_spaces_and_preserves_existing_install_on_failure(self):
+    def test_piped_installer_downloads_to_default_home_and_installed_cli_runs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            install_dir = root / "installed tools with spaces"
+            fake_bin = root / "fake bin"
+            write_fake_curl(fake_bin, successful_curl_body())
+            home = root / "home"
             environment = os.environ.copy()
-            environment["LINEAR_INSTALL_DIR"] = str(install_dir)
+            environment.pop("LINEAR_INSTALL_DIR", None)
+            environment.update(
+                {
+                    "HOME": str(home),
+                    "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
+                    "FAKE_CURL_SOURCE": str(SCRIPT),
+                    "FAKE_CURL_EXPECTED_URL": DOWNLOAD_URL,
+                }
+            )
             result = subprocess.run(
-                ["sh", str(ROOT / "install.sh")],
+                ["sh"],
                 cwd=root,
                 env=environment,
+                input=INSTALLER.read_text(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            target = home / ".local" / "bin" / "linear"
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(target.is_file())
+            self.assertTrue(target.stat().st_mode & stat.S_IXUSR)
+            self.assertEqual(target.read_bytes(), SCRIPT.read_bytes())
+            version = subprocess.run(
+                [str(target), "--version"],
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(version.returncode, 0, version.stderr)
+            self.assertEqual(version.stdout, "linear 0.1.1\n")
+
+    def test_installer_override_handles_spaces_and_download_failure_is_atomic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_bin = root / "fake bin"
+            write_fake_curl(fake_bin, successful_curl_body())
+            install_dir = root / "installed tools with spaces"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "LINEAR_INSTALL_DIR": str(install_dir),
+                    "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
+                    "FAKE_CURL_SOURCE": str(SCRIPT),
+                    "FAKE_CURL_EXPECTED_URL": DOWNLOAD_URL,
+                }
+            )
+            result = subprocess.run(
+                ["sh"],
+                cwd=root,
+                env=environment,
+                input=INSTALLER.read_text(),
                 text=True,
                 capture_output=True,
                 check=False,
@@ -429,23 +531,23 @@ class LinearTest(unittest.TestCase):
             target = install_dir / "linear"
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue(target.is_file())
-            self.assertTrue(target.stat().st_mode & stat.S_IXUSR)
             self.assertEqual(target.read_bytes(), SCRIPT.read_bytes())
-            version = subprocess.run(
-                [sys.executable, str(target), "--version"],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(version.stdout, "linear 0.1.0\n")
+            self.assertTrue(target.stat().st_mode & stat.S_IXUSR)
 
-            broken_checkout = root / "broken checkout with spaces"
-            broken_checkout.mkdir()
-            shutil.copy2(ROOT / "install.sh", broken_checkout / "install.sh")
             target.write_text("existing installation")
+            write_fake_curl(
+                fake_bin,
+                r'''output=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then shift; output=$1; fi
+  shift
+done
+printf '%s' 'partial download' > "$output"
+exit 22
+''',
+            )
             failed = subprocess.run(
-                ["sh", str(broken_checkout / "install.sh")],
+                ["sh", str(INSTALLER)],
                 cwd=root,
                 env=environment,
                 text=True,
@@ -454,6 +556,71 @@ class LinearTest(unittest.TestCase):
             )
             self.assertNotEqual(failed.returncode, 0)
             self.assertEqual(target.read_text(), "existing installation")
+            self.assertEqual(list(install_dir.glob(".linear.*")), [])
+
+    def test_installer_rejects_directory_target_and_reports_missing_requirements(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            no_tools = root / "no tools"
+            no_tools.mkdir()
+            environment = os.environ.copy()
+            environment["PATH"] = str(no_tools)
+            missing_curl = subprocess.run(
+                ["/bin/sh", str(INSTALLER)],
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(missing_curl.returncode, 0)
+            self.assertIn("curl is required", missing_curl.stderr)
+
+            fake_bin = root / "old python bin"
+            write_fake_curl(fake_bin, "exit 99\n")
+            python3 = fake_bin / "python3"
+            python3.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = \"--version\" ]; then echo 'Python 3.9.18'; fi\n"
+                "exit 1\n"
+            )
+            python3.chmod(0o755)
+            environment["PATH"] = str(fake_bin)
+            old_python = subprocess.run(
+                ["/bin/sh", str(INSTALLER)],
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(old_python.returncode, 0)
+            self.assertIn("Python 3.10 or newer is required", old_python.stderr)
+            self.assertIn("Python 3.9.18", old_python.stderr)
+
+            install_dir = root / "directory target install"
+            target = install_dir / "linear"
+            target.mkdir(parents=True)
+            current_python_bin = root / "current python bin"
+            write_fake_curl(current_python_bin, successful_curl_body())
+            environment.update(
+                {
+                    "LINEAR_INSTALL_DIR": str(install_dir),
+                    "PATH": str(current_python_bin)
+                    + os.pathsep
+                    + os.environ["PATH"],
+                    "FAKE_CURL_SOURCE": str(SCRIPT),
+                    "FAKE_CURL_EXPECTED_URL": DOWNLOAD_URL,
+                }
+            )
+            directory_target = subprocess.run(
+                ["sh", str(INSTALLER)],
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(directory_target.returncode, 0)
+            self.assertIn("install target is a directory", directory_target.stderr)
+            self.assertTrue(target.is_dir())
 
 
 if __name__ == "__main__":

@@ -4,27 +4,21 @@ A small, standalone command-line client for Linear. It provides focused issue
 commands plus a file-based GraphQL escape hatch for queries and mutations that
 do not warrant application-specific workflows.
 
-`bin/linear` is the entire application. It requires Python 3.10 or newer and
-uses only the Python standard library.
+## Setup
 
-## Install
-
-Clone with an authenticated GitHub CLI session, then run the local installer:
+`bin/linear` is the whole app. It needs Python 3.10 or newer, but has no
+packages to install and does not need the rest of this repository.
 
 ```sh
-gh auth login
-gh repo clone Diagonal-HQ/linear
-cd linear
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/Diagonal-HQ/linear/main/install.sh | sh
+~/.local/bin/linear --help
 ```
 
-This local-checkout flow works when the repository is private. The installer
-copies only `bin/linear` to `${LINEAR_INSTALL_DIR:-$HOME/.local/bin}/linear`,
-checks the Python version first, and does not edit shell configuration. To pick
-a different destination:
+The installer writes to `~/.local/bin`. Set `LINEAR_INSTALL_DIR` on the shell
+that runs the piped installer to choose a different directory:
 
 ```sh
-LINEAR_INSTALL_DIR="$HOME/bin" ./install.sh
+curl -fsSL https://raw.githubusercontent.com/Diagonal-HQ/linear/main/install.sh | LINEAR_INSTALL_DIR="$HOME/bin" sh
 ```
 
 ## Configure
@@ -87,13 +81,23 @@ Or pipe a query without variables:
 printf '%s\n' '{ viewer { id name } }' | linear graphql --file -
 ```
 
-## Test
+## Using it from a Paseo prompt
+
+The Paseo agent must inherit `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET`
+(plus `LINEAR_SCOPE`, if set). Invoke the installed app by its explicit path:
+
+```sh
+~/.local/bin/linear issue ENG-123
+```
+
+## Development
 
 ```sh
 make check
 ```
 
-The tests use synthetic credentials, mocked HTTP transport, and temporary
-cache/install directories. They do not contact Linear.
+The tests exercise a standalone copy of `bin/linear` and the piped installer.
+They use synthetic credentials, mocked HTTP transport, a fake downloader, and
+temporary cache/install directories. They do not contact Linear or GitHub.
 
 This helper was extracted from Diagonal engineering automation code.
