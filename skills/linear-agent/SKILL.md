@@ -1,31 +1,31 @@
 ---
-name: diagonal-linear
-description: Use the Diagonal-HQ/linear CLI to read and update Linear issues, post comments, and run GraphQL with OAuth app credentials. Apply when a task uses this standalone CLI, including automation without a Linear MCP connection.
+name: linear-agent
+description: Use the Diagonal-HQ/linear-agent CLI to read and update Linear issues, post comments, and run GraphQL with OAuth app credentials. Apply when a task uses this standalone CLI, including automation without a Linear MCP connection.
 ---
 
-# Diagonal Linear CLI
+# Linear Agent CLI
 
-Use the standalone CLI from [Diagonal-HQ/linear](https://github.com/Diagonal-HQ/linear).
+Use the standalone CLI from [Diagonal-HQ/linear-agent](https://github.com/Diagonal-HQ/linear-agent).
 It authenticates as a Linear OAuth app and supports issue commands and arbitrary
 GraphQL queries and mutations.
 
 ## Locate and configure
 
 Use the executable path configured by the client. The default installation is
-`~/.local/bin/linear`; `LINEAR_INSTALL_DIR` can select another directory. Check
-the executable's help before using it, since another CLI may also be named
-`linear`:
+`~/.local/bin/linear-agent`; `LINEAR_AGENT_INSTALL_DIR` can select another
+directory. Check the explicitly configured `linear-agent` executable's normal
+help before using it:
 
 ```sh
-linear_cli="${LINEAR_INSTALL_DIR:-$HOME/.local/bin}/linear"
-"$linear_cli" --version
-"$linear_cli" --help
-"$linear_cli" graphql --help
+linear_agent_cli="${LINEAR_AGENT_INSTALL_DIR:-$HOME/.local/bin}/linear-agent"
+"$linear_agent_cli" --version
+"$linear_agent_cli" --help
+"$linear_agent_cli" graphql --help
 ```
 
 The expected help describes a standalone Linear GraphQL client and includes
 `graphql --file`. Keep using that executable path for subsequent commands. See
-the [README setup instructions](https://github.com/Diagonal-HQ/linear#setup)
+the [README setup instructions](https://github.com/Diagonal-HQ/linear-agent#setup)
 if it is missing. Python 3.10 or newer is required; no Python packages are needed.
 
 The CLI requires `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` in its process
@@ -39,14 +39,14 @@ app-actor tokens](https://linear.app/developers/oauth-2-0-authentication#client-
 API commands mint and cache tokens automatically; `token`
 prints the access token, so avoid it for connectivity checks and keep its output
 out of agent logs. The cache is
-`${XDG_CACHE_HOME:-~/.cache}/linear/linear_token.json` and refreshes near expiry.
+`${XDG_CACHE_HOME:-~/.cache}/linear-agent/linear_token.json` and refreshes near expiry.
 
 ## Choose a command
 
 Replace the example identifiers and arguments with the user's intended values.
 Read commands return JSON; the write helpers return confirmation text.
 
-| Command, after `"$linear_cli"` | Behavior |
+| Command, after `"$linear_agent_cli"` | Behavior |
 | --- | --- |
 | `issue ENG-123` | Fetch one issue, including its state, description, and URL. |
 | `comments ENG-123` | Fetch the issue's comments. |
@@ -74,14 +74,14 @@ This read-only example uses temporary files so it does not overwrite project
 files. Serialize actual user values as JSON when adapting the variables:
 
 ```sh
-request_dir=$(mktemp -d "${TMPDIR:-/tmp}/diagonal-linear.XXXXXX")
+request_dir=$(mktemp -d "${TMPDIR:-/tmp}/linear-agent.XXXXXX")
 cat > "$request_dir/query.graphql" <<'GRAPHQL'
 query Issue($id: String!) {
   issue(id: $id) { id identifier title url }
 }
 GRAPHQL
 printf '%s\n' '{"id":"ENG-123"}' > "$request_dir/variables.json"
-"$linear_cli" graphql --file "$request_dir/query.graphql" \
+"$linear_agent_cli" graphql --file "$request_dir/query.graphql" \
   --variables-file "$request_dir/variables.json"
 ```
 

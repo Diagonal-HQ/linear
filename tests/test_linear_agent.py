@@ -18,10 +18,10 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "bin" / "linear"
+SCRIPT = ROOT / "bin" / "linear-agent"
 INSTALLER = ROOT / "install.sh"
-DOWNLOAD_URL = "https://raw.githubusercontent.com/Diagonal-HQ/linear/main/bin/linear"
-LOADER = importlib.machinery.SourceFileLoader("linear_cli", str(SCRIPT))
+DOWNLOAD_URL = "https://raw.githubusercontent.com/Diagonal-HQ/linear-agent/main/bin/linear-agent"
+LOADER = importlib.machinery.SourceFileLoader("linear_agent_cli", str(SCRIPT))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 assert SPEC is not None
 linear = importlib.util.module_from_spec(SPEC)
@@ -93,7 +93,7 @@ class LinearTest(unittest.TestCase):
             result = linear.main(argv)
         return result, stdout.getvalue(), stderr.getvalue()
 
-    # The nine original authentication/cache tests, migrated to bin/linear.
+    # The nine original authentication/cache tests, migrated to bin/linear-agent.
 
     def test_mint_uses_environment_credentials_and_default_or_custom_scope(self):
         cases = (
@@ -174,12 +174,12 @@ class LinearTest(unittest.TestCase):
                     self.assertEqual(linear.get_linear_token(), "replacement")
                     urlopen.assert_called_once()
 
-    def test_cache_is_created_privately_in_linear_directory(self):
+    def test_cache_is_created_privately_in_linear_agent_directory(self):
         with tempfile.TemporaryDirectory() as cache_root, self.env(cache_root), mock.patch.object(
             linear.urllib.request, "urlopen", return_value=token_response()
         ):
             linear.get_linear_token()
-            cache = Path(cache_root) / "linear" / "linear_token.json"
+            cache = Path(cache_root) / "linear-agent" / "linear_token.json"
             self.assertTrue(cache.is_file())
             self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(cache.parent.stat().st_mode), 0o700)
@@ -190,9 +190,9 @@ class LinearTest(unittest.TestCase):
         ), mock.patch.object(linear.tempfile, "mkstemp", side_effect=PermissionError):
             self.assertEqual(linear.get_linear_token(), "minted-token")
 
-    def test_home_cache_fallback_does_not_touch_another_tools_cache(self):
+    def test_home_cache_fallback_leaves_old_linear_cache_untouched(self):
         with tempfile.TemporaryDirectory() as home:
-            old_cache = Path(home) / ".cache" / "probe-profile" / "linear_token.json"
+            old_cache = Path(home) / ".cache" / "linear" / "linear_token.json"
             old_cache.parent.mkdir(parents=True)
             old_cache.write_text('{"token":"leave-me-alone"}')
             environment = {
@@ -207,7 +207,7 @@ class LinearTest(unittest.TestCase):
 
             self.assertEqual(old_cache.read_text(), '{"token":"leave-me-alone"}')
             self.assertTrue(
-                (Path(home) / ".cache" / "linear" / "linear_token.json").is_file()
+                (Path(home) / ".cache" / "linear-agent" / "linear_token.json").is_file()
             )
 
     def test_graphql_401_forces_exactly_one_remint_and_retry(self):
@@ -406,7 +406,7 @@ class LinearTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             isolated = Path(temporary) / "directory with spaces"
             isolated.mkdir()
-            copied = isolated / "standalone linear"
+            copied = isolated / "standalone linear-agent"
             shutil.copy2(SCRIPT, copied)
             copied.chmod(0o755)
             version = subprocess.run(
@@ -443,7 +443,7 @@ class LinearTest(unittest.TestCase):
             )
 
         self.assertEqual(version.returncode, 0, version.stderr)
-        self.assertEqual(version.stdout, "linear 0.1.1\n")
+        self.assertEqual(version.stdout, "linear-agent 0.2.0\n")
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         for command in (
             "token",
@@ -471,6 +471,12 @@ class LinearTest(unittest.TestCase):
             home = root / "home"
             environment = os.environ.copy()
             environment.pop("LINEAR_INSTALL_DIR", None)
+            environment.pop("LINEAR_AGENT_INSTALL_DIR", None)
+            install_dir = home / ".local" / "bin"
+            install_dir.mkdir(parents=True)
+            unrelated_linear = install_dir / "linear"
+            unrelated_linear.write_text("unrelated executable")
+            unrelated_linear.chmod(0o755)
             environment.update(
                 {
                     "HOME": str(home),
@@ -488,12 +494,14 @@ class LinearTest(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
-            target = home / ".local" / "bin" / "linear"
+            target = install_dir / "linear-agent"
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(target.is_file())
             self.assertTrue(target.stat().st_mode & stat.S_IXUSR)
             self.assertEqual(target.read_bytes(), SCRIPT.read_bytes())
+            self.assertEqual(unrelated_linear.read_text(), "unrelated executable")
+            self.assertTrue(unrelated_linear.stat().st_mode & stat.S_IXUSR)
             version = subprocess.run(
                 [str(target), "--version"],
                 env=environment,
@@ -502,7 +510,7 @@ class LinearTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(version.returncode, 0, version.stderr)
-            self.assertEqual(version.stdout, "linear 0.1.1\n")
+            self.assertEqual(version.stdout, "linear-agent 0.2.0\n")
 
     def test_installer_override_handles_spaces_and_download_failure_is_atomic(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -513,7 +521,7 @@ class LinearTest(unittest.TestCase):
             environment = os.environ.copy()
             environment.update(
                 {
-                    "LINEAR_INSTALL_DIR": str(install_dir),
+                    "LINEAR_AGENT_INSTALL_DIR": str(install_dir),
                     "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
                     "FAKE_CURL_SOURCE": str(SCRIPT),
                     "FAKE_CURL_EXPECTED_URL": DOWNLOAD_URL,
@@ -528,7 +536,7 @@ class LinearTest(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
-            target = install_dir / "linear"
+            target = install_dir / "linear-agent"
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(target.read_bytes(), SCRIPT.read_bytes())
@@ -556,7 +564,7 @@ exit 22
             )
             self.assertNotEqual(failed.returncode, 0)
             self.assertEqual(target.read_text(), "existing installation")
-            self.assertEqual(list(install_dir.glob(".linear.*")), [])
+            self.assertEqual(list(install_dir.glob(".linear-agent.*")), [])
 
     def test_installer_rejects_directory_target_and_reports_missing_requirements(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -597,13 +605,13 @@ exit 22
             self.assertIn("Python 3.9.18", old_python.stderr)
 
             install_dir = root / "directory target install"
-            target = install_dir / "linear"
+            target = install_dir / "linear-agent"
             target.mkdir(parents=True)
             current_python_bin = root / "current python bin"
             write_fake_curl(current_python_bin, successful_curl_body())
             environment.update(
                 {
-                    "LINEAR_INSTALL_DIR": str(install_dir),
+                    "LINEAR_AGENT_INSTALL_DIR": str(install_dir),
                     "PATH": str(current_python_bin)
                     + os.pathsep
                     + os.environ["PATH"],

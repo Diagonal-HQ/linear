@@ -29,7 +29,7 @@ from pathlib import Path
 LINEAR_API = "https://api.linear.app/graphql"
 LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
 DEFAULT_LINEAR_SCOPE = "read,write,app:assignable,app:mentionable"
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 
 
 # ── token minting / caching ────────────────────────────────────────────────
@@ -92,7 +92,7 @@ def _mint_token(client_id: str, client_secret: str, scope: str) -> dict:
 def _token_cache_path() -> Path:
     configured = os.environ.get("XDG_CACHE_HOME", "").strip()
     cache_root = Path(configured).expanduser() if configured else Path.home() / ".cache"
-    return cache_root / "linear" / "linear_token.json"
+    return cache_root / "linear-agent" / "linear_token.json"
 
 
 def _read_cached_token(cache: Path, fingerprint: str) -> str | None:
@@ -299,7 +299,7 @@ def _read_graphql_variables(path: str | None) -> dict:
 
 def cli_main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
-        prog="linear", description="Standalone Linear GraphQL command-line client"
+        prog="linear-agent", description="Standalone Linear GraphQL command-line client"
     )
     ap.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
