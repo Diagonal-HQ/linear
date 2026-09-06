@@ -1,0 +1,11 @@
+.env
+.env.*
+secrets/
+config.local.yaml
+cache/
+.cache/
+linear_token.json
+__pycache__/
+*.py[cod]
+*.swp
+.DS_Store

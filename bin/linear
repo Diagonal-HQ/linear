@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""A small, standalone Linear GraphQL command-line client.
+
+The executable uses environment-provided OAuth client credentials and caches
+app-actor tokens on disk with mode 0600. Tokens are refreshed shortly before
+expiry and re-minted once after an HTTP 401 response.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+LINEAR_API = "https://api.linear.app/graphql"
+LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token"
+DEFAULT_LINEAR_SCOPE = "read,write,app:assignable,app:mentionable"
+VERSION = "0.1.0"
+
+
+# ── token minting / caching ────────────────────────────────────────────────
+
+class LinearError(RuntimeError):
+    pass
+
+
+def _oauth_settings() -> tuple[str, str, str]:
+    client_id = os.environ.get("LINEAR_CLIENT_ID")
+    client_secret = os.environ.get("LINEAR_CLIENT_SECRET")
+    values = {"LINEAR_CLIENT_ID": client_id, "LINEAR_CLIENT_SECRET": client_secret}
+    missing = [name for name, value in values.items() if not value or not value.strip()]
+    if missing:
+        raise LinearError(f"missing required environment variable(s): {', '.join(missing)}")
+
+    scope = os.environ.get("LINEAR_SCOPE", "").strip() or DEFAULT_LINEAR_SCOPE
+    assert client_id is not None and client_secret is not None
+    return client_id, client_secret, scope
+
+
+def _configuration_fingerprint(client_id: str, client_secret: str, scope: str) -> str:
+    encoded = json.dumps(
+        [client_id, client_secret, scope], ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _mint_token(client_id: str, client_secret: str, scope: str) -> dict:
+    auth = "Basic " + base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    body = urllib.parse.urlencode({"grant_type": "client_credentials", "scope": scope}).encode()
+    req = urllib.request.Request(
+        LINEAR_TOKEN_URL, data=body,
+        headers={"Authorization": auth, "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw_response = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise LinearError(f"Linear token endpoint returned HTTP {exc.code}") from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise LinearError("Linear token endpoint network error") from None
+
+    try:
+        data = json.loads(raw_response.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise LinearError("Linear token endpoint returned invalid JSON") from None
+    if not isinstance(data, dict) or not isinstance(data.get("access_token"), str) or not data["access_token"]:
+        raise LinearError("Linear token endpoint response is missing access_token")
+    try:
+        expires_in = int(data.get("expires_in", 2592000))
+    except (TypeError, ValueError):
+        raise LinearError("Linear token endpoint returned invalid expires_in") from None
+    return {
+        "token": data["access_token"],
+        "expires_at": time.time() + expires_in - 60,  # expire one minute early
+    }
+
+
+def _token_cache_path() -> Path:
+    configured = os.environ.get("XDG_CACHE_HOME", "").strip()
+    cache_root = Path(configured).expanduser() if configured else Path.home() / ".cache"
+    return cache_root / "linear" / "linear_token.json"
+
+
+def _read_cached_token(cache: Path, fingerprint: str) -> str | None:
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        if (
+            isinstance(data, dict)
+            and isinstance(data.get("token"), str)
+            and data["token"]
+            and data.get("expires_at", 0) > time.time()
+            and data.get("configuration_fingerprint") == fingerprint
+        ):
+            return data["token"]
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _write_cached_token(cache: Path, data: dict) -> None:
+    temporary_path: str | None = None
+    descriptor: int | None = None
+    try:
+        cache.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(cache.parent, 0o700)
+        descriptor, temporary_path = tempfile.mkstemp(
+            dir=cache.parent, prefix=f".{cache.name}.", text=True
+        )
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+            descriptor = None
+            json.dump(data, temporary, separators=(",", ":"))
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, cache)
+        temporary_path = None
+    except OSError:
+        pass
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+
+
+def get_linear_token(force: bool = False) -> str:
+    client_id, client_secret, scope = _oauth_settings()
+    fingerprint = _configuration_fingerprint(client_id, client_secret, scope)
+
+    cache = _token_cache_path()
+    if not force:
+        cached_token = _read_cached_token(cache, fingerprint)
+        if cached_token is not None:
+            return cached_token
+
+    minted = _mint_token(client_id, client_secret, scope)
+    minted["configuration_fingerprint"] = fingerprint
+    _write_cached_token(cache, minted)
+    return minted["token"]
+
+
+# ── GraphQL ────────────────────────────────────────────────────────────────
+
+def gql(query: str, variables: dict | None = None) -> dict:
+    """Run a GraphQL query with automatic token re-mint on 401."""
+    variables = variables or {}
+    for attempt in range(2):
+        token = get_linear_token(force=(attempt == 1))
+        req = urllib.request.Request(
+            LINEAR_API,
+            data=json.dumps({"query": query, "variables": variables}).encode(),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                raw_response = resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and attempt == 0:
+                continue
+            raise LinearError(f"Linear HTTP {e.code}") from None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            raise LinearError("Linear network error") from None
+
+        try:
+            data = json.loads(raw_response.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise LinearError("Linear API returned invalid JSON") from None
+        if not isinstance(data, dict):
+            raise LinearError("Linear API returned an invalid response")
+        if "errors" in data:
+            errors = data["errors"] if isinstance(data["errors"], list) else []
+            msgs = "; ".join(
+                str(err.get("message", "?")) for err in errors if isinstance(err, dict)
+            ) or "unknown error"
+            msgs = msgs.replace(token, "[redacted]")
+            raise LinearError(f"Linear GraphQL error: {msgs}")
+        return data.get("data") or {}
+    raise LinearError("Linear authentication failed after retry")
+
+
+def team_states(team: str) -> dict[str, str]:
+    """Map of workflow-state name -> id for a team."""
+    if not team:
+        raise LinearError("team_states needs a team name")
+    data = gql(
+        "query TeamStates($team: String!) { workflowStates(filter: { team: { name: { eq: $team } } }) { nodes { id name } } }",
+        {"team": team},
+    )
+    return {s["name"]: s["id"] for s in data["workflowStates"]["nodes"]}
+
+
+def set_issue_state(issue_id: str, state_id: str) -> None:
+    data = gql(
+        "mutation SetState($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) { success } }",
+        {"id": issue_id, "stateId": state_id},
+    )
+    if not data.get("issueUpdate", {}).get("success"):
+        raise LinearError(f"issueUpdate failed for {issue_id}")
+
+
+def issue_state(identifier: str) -> dict | None:
+    """{id, identifier, state name, team name} for an issue identifier."""
+    data = gql(
+        "query IssueState($id: String!) { issue(id: $id) { id identifier state { name } team { name } } }",
+        {"id": identifier},
+    )
+    return data.get("issue")
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────
+
+ISSUE_QUERY = """
+query Issue($id: String!) {
+  issue(id: $id) {
+    id identifier title description state { name type } team { name }
+    priority labels { nodes { name } }
+    assignee { displayName } delegate { displayName }
+    branchName url createdAt updatedAt
+  }
+}
+"""
+
+COMMENTS_QUERY = """
+query Comments($id: String!) {
+  issue(id: $id) { comments { nodes { id body createdAt user { name displayName } } } }
+}
+"""
+
+USERS_QUERY = """
+query Users { users(first: 100) { nodes { id name displayName email } } }
+"""
+
+
+def _fetch_issue(identifier: str) -> dict:
+    data = gql(ISSUE_QUERY, {"id": identifier})
+    issue = data.get("issue")
+    if not issue:
+        raise SystemExit(f"no such issue: {identifier}")
+    return issue
+
+
+def _read_graphql_query(path: str) -> str:
+    if path == "-":
+        query = sys.stdin.read()
+    else:
+        try:
+            query = Path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise LinearError(f"cannot read GraphQL query file {path!r}: {exc}") from None
+    if not query.strip():
+        raise LinearError("GraphQL query is empty")
+    if "\x00" in query:
+        raise LinearError("GraphQL query contains a NUL byte")
+    significant = re.sub(r"(?m)^\s*#.*$", "", query).lstrip()
+    if not (
+        significant.startswith("{")
+        or re.match(r"(?:query|mutation|subscription|fragment)\b", significant)
+    ):
+        raise LinearError(
+            "GraphQL query must start with a selection set or operation definition"
+        )
+    return query
+
+
+def _read_graphql_variables(path: str | None) -> dict:
+    if path is None:
+        return {}
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise LinearError(f"cannot read GraphQL variables file {path!r}: {exc}") from None
+    try:
+        variables = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise LinearError(
+            f"GraphQL variables file {path!r} is not valid JSON: {exc.msg}"
+        ) from None
+    if not isinstance(variables, dict):
+        raise LinearError("GraphQL variables must be a JSON object")
+    return variables
+
+
+def cli_main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="linear", description="Standalone Linear GraphQL command-line client"
+    )
+    ap.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("token", help="print the current app-actor token")
+
+    p = sub.add_parser("issue", help="fetch one issue as JSON")
+    p.add_argument("identifier")
+
+    p = sub.add_parser("comments", help="fetch an issue's comments as JSON")
+    p.add_argument("identifier")
+
+    p = sub.add_parser("set-state", help="move an issue to a workflow state by NAME")
+    p.add_argument("identifier")
+    p.add_argument("state")
+
+    p = sub.add_parser("set-description", help="replace an issue's description (body from --file or stdin)")
+    p.add_argument("identifier")
+    p.add_argument("--file")
+
+    p = sub.add_parser("comment", help="post a comment")
+    p.add_argument("identifier")
+    p.add_argument("body")
+
+    sub.add_parser("users", help="list users")
+
+    p = sub.add_parser("graphql", help="run GraphQL from a file or stdin")
+    p.add_argument("--file", required=True, metavar="PATH", help="query file, or - for stdin")
+    p.add_argument("--variables-file", metavar="PATH", help="JSON object containing variables")
+
+    args = ap.parse_args(argv)
+
+    if args.cmd == "token":
+        print(get_linear_token())
+        return 0
+    if args.cmd == "issue":
+        issue = _fetch_issue(args.identifier)
+        issue["labels"] = [l["name"] for l in issue.get("labels", {}).get("nodes", [])]
+        print(json.dumps(issue, indent=2))
+        return 0
+    if args.cmd == "comments":
+        data = gql(COMMENTS_QUERY, {"id": args.identifier})
+        print(json.dumps(data.get("issue", {}).get("comments", {}).get("nodes", []), indent=2))
+        return 0
+    if args.cmd == "set-state":
+        info = issue_state(args.identifier)
+        if not info:
+            raise SystemExit(f"no such issue: {args.identifier}")
+        states = team_states(info["team"]["name"])
+        state_id = states.get(args.state)
+        if not state_id:
+            raise SystemExit(f"team {info['team']['name']} has no state {args.state!r} (have: {', '.join(sorted(states))})")
+        set_issue_state(info["id"], state_id)
+        print(f"{args.identifier} -> {args.state}")
+        return 0
+    if args.cmd == "set-description":
+        if args.file:
+            body = Path(args.file).read_text()
+        else:
+            body = sys.stdin.read()
+        info = issue_state(args.identifier)
+        if not info:
+            raise SystemExit(f"no such issue: {args.identifier}")
+        data = gql(
+            "mutation SetDesc($id: String!, $d: String!) { issueUpdate(id: $id, input: { description: $d }) { success } }",
+            {"id": info["id"], "d": body},
+        )
+        if not data.get("issueUpdate", {}).get("success"):
+            raise SystemExit("issueUpdate failed")
+        print(f"{args.identifier}: description updated")
+        return 0
+    if args.cmd == "comment":
+        info = issue_state(args.identifier)
+        if not info:
+            raise SystemExit(f"no such issue: {args.identifier}")
+        data = gql(
+            "mutation Comment($input: CommentCreateInput!) { commentCreate(input: $input) { success } }",
+            {"input": {"issueId": info["id"], "body": args.body}},
+        )
+        if not data.get("commentCreate", {}).get("success"):
+            raise SystemExit("commentCreate failed")
+        print(f"{args.identifier}: comment posted")
+        return 0
+    if args.cmd == "users":
+        data = gql(USERS_QUERY)
+        print(json.dumps(data.get("users", {}).get("nodes", []), indent=2))
+        return 0
+    if args.cmd == "graphql":
+        query = _read_graphql_query(args.file)
+        variables = _read_graphql_variables(args.variables_file)
+        print(json.dumps(gql(query, variables), indent=2))
+        return 0
+    return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        return cli_main(sys.argv[1:] if argv is None else argv)
+    except LinearError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
